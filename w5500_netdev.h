@@ -10,6 +10,8 @@
 #include <linux/atomic.h>
 #include <linux/gpio/consumer.h>
 #include <linux/kfifo.h>
+#include <linux/dmaengine.h>
+#include <linux/dma-mapping.h>
 
 #define FAILURE_STATE_CTF_THRESHOLD 32
 #define FAILURE_STATE_CRF_THRESHOLD 32
@@ -34,8 +36,14 @@ struct failure_state{
     unsigned int consecutive_linkup_checks_without_receiving_data;
 };
 
+struct receive_data{
+    unsigned char* data;
+    dma_addr_t data_dma;
+};
+
 struct transmit_data{   
     unsigned char* data;
+    dma_addr_t data_dma;
     unsigned short data_length;
 };
 
@@ -52,8 +60,8 @@ struct w5500_netdev_priv{
     spinlock_t transmit_spinlock;
     struct net_device_ops my_netdev_ops;
     DECLARE_KFIFO_PTR(transmit_queue, struct transmit_data);
-    DECLARE_KFIFO_PTR(transmit_buffers, unsigned char*);
-    unsigned char* receive_buffer;
+    DECLARE_KFIFO_PTR(transmit_buffers, struct transmit_data);
+    struct receive_data receive_buffer;
     bool is_open;
     bool linkup;
     struct failure_state failure_state;

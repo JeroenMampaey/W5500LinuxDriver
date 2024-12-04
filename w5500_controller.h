@@ -58,9 +58,11 @@ int check_linkup(struct w5500_controller* controller,
     bool* linkup);
 int transmit_MACRAW(struct w5500_controller* controller, 
     unsigned char* data, 
+    dma_addr_t data_dma,
     const unsigned short data_length);
 int receive_MACRAW(struct w5500_controller* controller, 
-    unsigned char* data, 
+    unsigned char* data,
+    dma_addr_t data_dma, 
     unsigned short* data_length);
 void on_packet_reception(struct w5500_controller* controller,
     void (*reception_callback)(void*), 

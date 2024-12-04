@@ -28,12 +28,14 @@ static int write_socket_n_register(struct w5500_controller* controller,
 static int write_socket_n_tx_buffer(struct w5500_controller* controller, 
     unsigned int socket, 
     unsigned short buffer_offset,
-    const unsigned char* data, 
+    const unsigned char* data,
+    dma_addr_t data_dma,
     const unsigned short data_length);
 static int read_socket_n_rx_buffer(struct w5500_controller* controller,
     unsigned int socket,
     unsigned short buffer_offset,
-    unsigned char* data, 
+    unsigned char* data,
+    dma_addr_t data_dma, 
     const unsigned short data_length);
 static void receive_task(struct work_struct *w);
 static void reschedule_receive_task(struct work_struct *w);
@@ -226,7 +228,7 @@ static int write_socket_n_register(struct w5500_controller* controller, unsigned
     return 0;
 }
 
-static int write_socket_n_tx_buffer(struct w5500_controller* controller, unsigned int socket, unsigned short buffer_offset, const unsigned char* data, const unsigned short data_length){
+static int write_socket_n_tx_buffer(struct w5500_controller* controller, unsigned int socket, unsigned short buffer_offset, const unsigned char* data, dma_addr_t data_dma, const unsigned short data_length){
     if(socket > 7){
         w5500_ctrl_check_err_code = W5500_CTRL_ERR_INVALID_SOCKET;
         return -1;
@@ -245,12 +247,15 @@ static int write_socket_n_tx_buffer(struct w5500_controller* controller, unsigne
     };
     struct spi_transfer transfer2 = {
         .tx_buf = data,
+        .tx_dma = data_dma,
         .rx_buf = NULL,
         .len = data_length,
     };
 
     struct spi_transfer transfers[2] = {transfer1, transfer2};
-    int result = spi_sync_transfer(spi, transfers, 2);
+    struct spi_message m;
+    spi_message_init_with_transfers(&m, transfers, 2);
+    int result = spi_sync(spi, &m);
 
     if(result){
         w5500_ctrl_check_err_code = W5500_CTRL_ERR_SPI_ERROR;
@@ -260,7 +265,7 @@ static int write_socket_n_tx_buffer(struct w5500_controller* controller, unsigne
     return 0;
 }
 
-static int read_socket_n_rx_buffer(struct w5500_controller* controller, unsigned int socket, unsigned short buffer_offset, unsigned char* data, const unsigned short data_length){
+static int read_socket_n_rx_buffer(struct w5500_controller* controller, unsigned int socket, unsigned short buffer_offset, unsigned char* data, dma_addr_t data_dma, const unsigned short data_length){
     if(socket > 7){
         w5500_ctrl_check_err_code = W5500_CTRL_ERR_INVALID_SOCKET;
         return -1;
@@ -280,11 +285,14 @@ static int read_socket_n_rx_buffer(struct w5500_controller* controller, unsigned
     struct spi_transfer transfer2 = {
         .tx_buf = NULL,
         .rx_buf = data,
+        .rx_dma = data_dma,
         .len = data_length,
     };
 
     struct spi_transfer transfers[2] = {transfer1, transfer2};
-    int result = spi_sync_transfer(spi, transfers, 2);
+    struct spi_message m;
+    spi_message_init_with_transfers(&m, transfers, 2);
+    int result = spi_sync(spi, &m);
 
     if(result){
         w5500_ctrl_check_err_code = W5500_CTRL_ERR_SPI_ERROR;
@@ -389,7 +397,7 @@ int stop_w5500(struct w5500_controller* controller){
     return 0;
 }
 
-int transmit_MACRAW(struct w5500_controller* controller, unsigned char* data, const unsigned short data_length){
+int transmit_MACRAW(struct w5500_controller* controller, unsigned char* data, dma_addr_t data_dma, const unsigned short data_length){
     // Check if the TX buffer of socket 0 is big enough
     unsigned char tx_free_size[2];
     W5500_CTRL_ABORT_ON_ERR(read_socket_n_register(controller, 0, 0x0020, tx_free_size, 2));
@@ -405,7 +413,7 @@ int transmit_MACRAW(struct w5500_controller* controller, unsigned char* data, co
     unsigned short tx_write_pointer = (((unsigned short)tx_wr[0]) << 8) + ((unsigned short)tx_wr[1]);
 
     // Write to the socker buffer with offset tx_write_pointer
-    W5500_CTRL_ABORT_ON_ERR(write_socket_n_tx_buffer(controller, 0, tx_write_pointer, data, data_length));
+    W5500_CTRL_ABORT_ON_ERR(write_socket_n_tx_buffer(controller, 0, tx_write_pointer, data, data_dma, data_length));
 
     // Update the TX write pointer
     tx_write_pointer += data_length;
@@ -509,7 +517,7 @@ void on_packet_reception(struct w5500_controller* controller, void (*reception_c
 }
 
 
-int receive_MACRAW(struct w5500_controller* controller, unsigned char* data, unsigned short* data_length){
+int receive_MACRAW(struct w5500_controller* controller, unsigned char* data, dma_addr_t data_dma, unsigned short* data_length){
     // Get the buffer size of the RX buffer
     unsigned char rx_free_size[2];
     W5500_CTRL_ABORT_ON_ERR(read_socket_n_register(controller, 0, 0x0026, rx_free_size, 2));
@@ -529,7 +537,7 @@ int receive_MACRAW(struct w5500_controller* controller, unsigned char* data, uns
     unsigned short rx_read_pointer = (((unsigned short)rx_rd[0]) << 8) + ((unsigned short)rx_rd[1]);
     
     // Read the data from the RX buffer
-    W5500_CTRL_ABORT_ON_ERR(read_socket_n_rx_buffer(controller, 0, rx_read_pointer, data, *data_length));
+    W5500_CTRL_ABORT_ON_ERR(read_socket_n_rx_buffer(controller, 0, rx_read_pointer, data, data_dma, *data_length));
 
     // Update the RX read pointer
     rx_read_pointer += *data_length;

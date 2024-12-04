@@ -57,16 +57,19 @@ int w5500_netdev_open(struct net_device *dev){
         goto open_err3;
     }
     for(int i=0; i<MAX_TX_QUEUE_SIZE; i++){
-        unsigned char* buffer = kmalloc(2048, GFP_KERNEL);
-        if(!buffer){
+        struct transmit_data tx_buffer;
+        tx_buffer.data = dma_alloc_coherent(priv->spi->master->dma_tx->device->dev,
+            sizeof(unsigned char)*2048, &tx_buffer.data_dma, GFP_KERNEL);
+        if(!tx_buffer.data){
             printk("w5500_driver - Error allocating free buffer for transmit_buffers!\n");
             goto open_err4;
         }
-        kfifo_put(&priv->transmit_buffers, buffer);
+        kfifo_put(&priv->transmit_buffers, tx_buffer);
     }
 
-    priv->receive_buffer = kmalloc(sizeof(unsigned char)*2048*16, GFP_KERNEL);
-    if(!priv->receive_buffer){
+    priv->receive_buffer.data = dma_alloc_coherent(priv->spi->master->dma_rx->device->dev, 
+        sizeof(unsigned char)*2048*16, &priv->receive_buffer.data_dma, GFP_KERNEL);
+    if(!priv->receive_buffer.data){
         printk("w5500_driver - Error allocating receive buffer!\n");
         goto open_err4;
     }
@@ -95,9 +98,11 @@ int w5500_netdev_open(struct net_device *dev){
     return 0;
 
 open_err4:
-    unsigned char* free_buffer;
-    while(kfifo_get(&priv->transmit_buffers, &free_buffer)){
-        kfree(free_buffer);
+    dmaengine_terminate_all(priv->spi->master->dma_tx);
+    struct transmit_data tx_buffer;
+    while(kfifo_get(&priv->transmit_buffers, &tx_buffer)){
+        dma_free_coherent(priv->spi->master->dma_tx->device->dev, sizeof(unsigned char)*2048, 
+            tx_buffer.data, tx_buffer.data_dma);
     }
     kfifo_free(&priv->transmit_buffers);
 
@@ -134,18 +139,22 @@ int w5500_netdev_release(struct net_device *dev){
     cancel_work_sync(&priv->linkup_work);
     flush_workqueue(priv->w5500_transmit_wq);
     destroy_workqueue(priv->w5500_transmit_wq);
+    dmaengine_terminate_all(priv->spi->master->dma_tx);
+    dmaengine_terminate_all(priv->spi->master->dma_rx);
     struct transmit_data tx_data;
     while(kfifo_get(&priv->transmit_queue, &tx_data)){
-        kfree(tx_data.data);
+        dma_free_coherent(priv->spi->master->dma_tx->device->dev, sizeof(unsigned char)*2048, 
+            tx_data.data, tx_data.data_dma);
     }
     kfifo_free(&priv->transmit_queue);
-    unsigned char* free_buffer;
-    while(kfifo_get(&priv->transmit_buffers, &free_buffer)){
-        kfree(free_buffer);
+    while(kfifo_get(&priv->transmit_buffers, &tx_data)){
+        dma_free_coherent(priv->spi->master->dma_tx->device->dev, sizeof(unsigned char)*2048, 
+            tx_data.data, tx_data.data_dma);
     }
     kfifo_free(&priv->transmit_buffers);
-    kfree(priv->receive_buffer);
-
+    dma_free_coherent(priv->spi->master->dma_rx->device->dev, sizeof(unsigned char)*2048*16, 
+        priv->receive_buffer.data, priv->receive_buffer.data_dma);
+    
     free_w5500_controller(&priv->controller);
 
     priv->is_open = false;
@@ -174,7 +183,7 @@ int w5500_netdev_xmit(struct sk_buff *skb, struct net_device *dev){
     }
     
     struct transmit_data tx_data;
-    if(!kfifo_get(&priv->transmit_buffers, &tx_data.data)){
+    if(!kfifo_get(&priv->transmit_buffers, &tx_data)){
         printk("w5500_driver - Error getting free buffer for transmit_buffers, this should not happen\n");
         unsigned int transmit_buffers_size = kfifo_len(&priv->transmit_buffers);
         unsigned int transmit_queue_size = kfifo_len(&priv->transmit_queue);
@@ -210,7 +219,7 @@ int w5500_netdev_xmit(struct sk_buff *skb, struct net_device *dev){
         printk("w5500_driver - Transmit queue full before adding element, this should not happen!\n");
         atomic_long_inc((atomic_long_t*)&stats->tx_errors);
         netif_stop_queue(dev);
-        if(!kfifo_put(&priv->transmit_buffers, tx_data.data)){
+        if(!kfifo_put(&priv->transmit_buffers, tx_data)){
             printk("w5500_driver - Error putting buffer back into transmit_buffers, this definitely should not happen!!!!!\n");
             kfree(tx_data.data);
         }
@@ -313,7 +322,7 @@ static void w5500_transmit_task(struct work_struct *w){
         }
 
         W5500_CTRL_IF_ERR(
-            WAIT_IF_RESETTING(transmit_MACRAW(priv->controller, tx_data.data, tx_data.data_length), &priv->reset_flags.transmit_flags)
+            WAIT_IF_RESETTING(transmit_MACRAW(priv->controller, tx_data.data, tx_data.data_dma, tx_data.data_length), &priv->reset_flags.transmit_flags)
         ){
             printk("w5500_driver - Error %d transmitting data\n", W5500_CTRL_ERR);
             atomic_long_inc((atomic_long_t*)&stats->tx_errors);
@@ -331,7 +340,7 @@ static void w5500_transmit_task(struct work_struct *w){
         }
 
         spin_lock_irqsave(&priv->transmit_spinlock, flags);
-        if(!kfifo_put(&priv->transmit_buffers, tx_data.data)){
+        if(!kfifo_put(&priv->transmit_buffers, tx_data)){
             printk("w5500_driver - Error putting buffer back into transmit_buffers, this should not happen!\n");
             kfree(tx_data.data);
         }
@@ -368,7 +377,7 @@ static void w5500_on_packet_reception_callback(void* callback_data){
 
     unsigned short data_length;
     W5500_CTRL_IF_ERR(
-        WAIT_IF_RESETTING(receive_MACRAW(priv->controller, priv->receive_buffer, &data_length), &priv->reset_flags.receive_flags)
+        WAIT_IF_RESETTING(receive_MACRAW(priv->controller, priv->receive_buffer.data, priv->receive_buffer.data_dma, &data_length), &priv->reset_flags.receive_flags)
     ){
         if(W5500_CTRL_ERR != W5500_CTRL_ERR_RX_SIZE_ZERO){
             printk("w5500_driver - Error %d receiving data\n", W5500_CTRL_ERR);
@@ -391,11 +400,11 @@ static void w5500_on_packet_reception_callback(void* callback_data){
     while(
         (offset + 2 <= data_length)
         &&
-        ((next_packet_size = (((unsigned int)priv->receive_buffer[offset]) << 8) + ((unsigned int)priv->receive_buffer[offset+1])) >= 2)
+        ((next_packet_size = (((unsigned int)priv->receive_buffer.data[offset]) << 8) + ((unsigned int)priv->receive_buffer.data[offset+1])) >= 2)
         &&
         (offset + next_packet_size <= (unsigned int)data_length)
     ){
-        unsigned char* next_packet = priv->receive_buffer + offset + 2;
+        unsigned char* next_packet = priv->receive_buffer.data + offset + 2;
         offset += next_packet_size;
         next_packet_size -= 2;
 
